@@ -5,6 +5,7 @@ import {estimateWorstCaseActionDurationMs} from "./utils/executionBudget.js";
 
 const runtimePolicySchema = z.enum(["hybrid", "all-e2b", "internal-only"]);
 const actionDriverSchema = z.enum(["noop", "http-bridge", "redis-stream"]);
+const trustTierSchema = z.enum(["external", "partner", "internal"]);
 
 const envSchema = z.object({
   PORT: z.string().default("8787").transform(Number).pipe(z.number().int().min(1).max(65535)),
@@ -14,6 +15,37 @@ const envSchema = z.object({
 
   CLABO_PUBLIC_URL: z.string().url().default("https://clabo.example.com"),
   CLABO_APP_NAME: z.string().min(1).default("Clabo"),
+  CLABO_HUMAN_PORTAL_ENABLED: z
+    .string()
+    .default("true")
+    .transform(value => value === "true"),
+  CLABO_HUMAN_PORTAL_TITLE: z.string().trim().min(1).max(120).default("Clabbo Human Portal"),
+  CLABO_HUMAN_PORTAL_GAME_URL: z
+    .union([z.string().url(), z.literal("")])
+    .default("")
+    .transform(value => (value.trim().length ? value : undefined)),
+  CLABO_HUMAN_PORTAL_ALLOW_EMBED: z
+    .string()
+    .default("true")
+    .transform(value => value === "true"),
+  CLABO_HUMAN_PORTAL_ACCESS_CODES: z.string().default("clabbo-demo-access"),
+  CLABO_HUMAN_PORTAL_DEFAULT_WORKSPACE_ID: z.string().trim().min(1).max(128).default("hotel-main"),
+  CLABO_HUMAN_PORTAL_ALLOWED_WORKSPACE_IDS: z.string().default("hotel-main"),
+  CLABO_HUMAN_PORTAL_SESSION_TTL_SECONDS: z
+    .string()
+    .default("28800")
+    .transform(Number)
+    .pipe(z.number().int().min(300).max(86400)),
+  CLABO_HUMAN_PORTAL_COOKIE_NAME: z
+    .string()
+    .trim()
+    .regex(/^[a-zA-Z0-9_.-]{1,64}$/)
+    .default("clabbo_human_portal"),
+  CLABO_HUMAN_PORTAL_SESSION_SECRET: z.string().default(""),
+  CLABO_HUMAN_PORTAL_ISSUED_TRUST_TIER: trustTierSchema.default("external"),
+  CLABO_HUMAN_PORTAL_ISSUED_CAPABILITIES: z
+    .string()
+    .default("room.chat.send,room.chat.whisper,room.user.movement,room.user.expression,workspace.read"),
 
   CLABO_AUTH_HEADER_NAME: z.string().default("X-Clabbo-Agent-Identity"),
   CLABO_AUTH_ISSUER: z.string().min(1).default("clabbo.identity"),
@@ -170,6 +202,20 @@ export interface AppConfig {
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   claboPublicUrl: string;
   claboAppName: string;
+  humanPortal: {
+    enabled: boolean;
+    title: string;
+    gameUrl?: string;
+    allowEmbed: boolean;
+    accessCodes: string[];
+    defaultWorkspaceId: string;
+    allowedWorkspaceIds: string[];
+    sessionTtlSeconds: number;
+    cookieName: string;
+    sessionSecret: string;
+    issuedTrustTier: "external" | "partner" | "internal";
+    issuedCapabilities: string[];
+  };
   auth: {
     headerName: string;
     issuer: string;
@@ -226,6 +272,17 @@ function parseCapabilities(raw: string): string[] {
   );
 }
 
+function parseDelimitedValues(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw
+        .split(",")
+        .map(value => value.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
 function parseAuthKeys(raw: string): Record<string, string> {
   const entries = raw
     .split(",")
@@ -256,14 +313,45 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
   const allowedCapabilities = parseCapabilities(parsed.CLABO_ALLOWED_CAPABILITIES);
   const authKeys = parseAuthKeys(parsed.CLABO_AUTH_KEYS);
+  const currentAuthKey = authKeys[parsed.CLABO_AUTH_CURRENT_KID];
+  if (!currentAuthKey) {
+    throw new Error(`CLABO_AUTH_CURRENT_KID '${parsed.CLABO_AUTH_CURRENT_KID}' is missing from CLABO_AUTH_KEYS`);
+  }
+  const humanPortalAccessCodes = parseDelimitedValues(parsed.CLABO_HUMAN_PORTAL_ACCESS_CODES);
+  const humanPortalAllowedWorkspaceIds = parseDelimitedValues(parsed.CLABO_HUMAN_PORTAL_ALLOWED_WORKSPACE_IDS);
+  const humanPortalIssuedCapabilities = parseCapabilities(parsed.CLABO_HUMAN_PORTAL_ISSUED_CAPABILITIES);
+  const humanPortalSessionSecretRaw = parsed.CLABO_HUMAN_PORTAL_SESSION_SECRET.trim();
+  const humanPortalSessionSecret = humanPortalSessionSecretRaw || currentAuthKey;
 
   if (!allowedCapabilities.length) throw new Error("CLABO_ALLOWED_CAPABILITIES cannot be empty");
-  if (!authKeys[parsed.CLABO_AUTH_CURRENT_KID]) {
-    throw new Error(`CLABO_AUTH_CURRENT_KID '${parsed.CLABO_AUTH_CURRENT_KID}' is missing from CLABO_AUTH_KEYS`);
+  if (parsed.CLABO_HUMAN_PORTAL_ENABLED && !humanPortalAccessCodes.length) {
+    throw new Error("CLABO_HUMAN_PORTAL_ACCESS_CODES cannot be empty when CLABO_HUMAN_PORTAL_ENABLED=true");
+  }
+  if (parsed.CLABO_HUMAN_PORTAL_ENABLED && !humanPortalSessionSecret) {
+    throw new Error("CLABO_HUMAN_PORTAL_SESSION_SECRET is required when CLABO_HUMAN_PORTAL_ENABLED=true");
+  }
+  if (parsed.CLABO_HUMAN_PORTAL_ENABLED && humanPortalSessionSecret.length < 16) {
+    throw new Error("CLABO_HUMAN_PORTAL_SESSION_SECRET is too short. Use at least 16 characters.");
+  }
+  if (parsed.CLABO_HUMAN_PORTAL_ENABLED && !humanPortalIssuedCapabilities.length) {
+    throw new Error("CLABO_HUMAN_PORTAL_ISSUED_CAPABILITIES cannot be empty when portal is enabled");
+  }
+  const humanPortalMissingCapabilities = humanPortalIssuedCapabilities.filter(capability => !allowedCapabilities.includes(capability));
+  if (humanPortalMissingCapabilities.length) {
+    throw new Error(
+      `CLABO_HUMAN_PORTAL_ISSUED_CAPABILITIES include unknown or disallowed capabilities: ${humanPortalMissingCapabilities.join(", ")}`
+    );
   }
 
   if (parsed.NODE_ENV === "production" && parsed.CLABO_AUTH_KEYS.includes("clabbo_dev_secret_change_me")) {
     throw new Error("Refusing to start in production with default CLABO_AUTH_KEYS secret");
+  }
+  if (
+    parsed.NODE_ENV === "production" &&
+    parsed.CLABO_HUMAN_PORTAL_ENABLED &&
+    humanPortalAccessCodes.includes("clabbo-demo-access")
+  ) {
+    throw new Error("Refusing to start in production with default CLABO_HUMAN_PORTAL_ACCESS_CODES value");
   }
   if (parsed.CLABO_ACTION_DRIVER === "http-bridge" && !parsed.CLABO_ACTION_BRIDGE_URL) {
     throw new Error("CLABO_ACTION_DRIVER=http-bridge requires CLABO_ACTION_BRIDGE_URL");
@@ -308,6 +396,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
+  const humanPortalAllowedWorkspaces =
+    humanPortalAllowedWorkspaceIds.length > 0 ? humanPortalAllowedWorkspaceIds : [parsed.CLABO_HUMAN_PORTAL_DEFAULT_WORKSPACE_ID];
+
+  if (!humanPortalAllowedWorkspaces.includes(parsed.CLABO_HUMAN_PORTAL_DEFAULT_WORKSPACE_ID)) {
+    humanPortalAllowedWorkspaces.unshift(parsed.CLABO_HUMAN_PORTAL_DEFAULT_WORKSPACE_ID);
+  }
+
   return {
     port: parsed.PORT,
     host: parsed.HOST,
@@ -315,6 +410,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     logLevel: parsed.LOG_LEVEL,
     claboPublicUrl: parsed.CLABO_PUBLIC_URL,
     claboAppName: parsed.CLABO_APP_NAME,
+    humanPortal: {
+      enabled: parsed.CLABO_HUMAN_PORTAL_ENABLED,
+      title: parsed.CLABO_HUMAN_PORTAL_TITLE,
+      gameUrl: parsed.CLABO_HUMAN_PORTAL_GAME_URL,
+      allowEmbed: parsed.CLABO_HUMAN_PORTAL_ALLOW_EMBED,
+      accessCodes: humanPortalAccessCodes,
+      defaultWorkspaceId: parsed.CLABO_HUMAN_PORTAL_DEFAULT_WORKSPACE_ID,
+      allowedWorkspaceIds: humanPortalAllowedWorkspaces,
+      sessionTtlSeconds: parsed.CLABO_HUMAN_PORTAL_SESSION_TTL_SECONDS,
+      cookieName: parsed.CLABO_HUMAN_PORTAL_COOKIE_NAME,
+      sessionSecret: humanPortalSessionSecret,
+      issuedTrustTier: parsed.CLABO_HUMAN_PORTAL_ISSUED_TRUST_TIER,
+      issuedCapabilities: humanPortalIssuedCapabilities
+    },
     auth: {
       headerName: parsed.CLABO_AUTH_HEADER_NAME,
       issuer: parsed.CLABO_AUTH_ISSUER,

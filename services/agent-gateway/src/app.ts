@@ -12,6 +12,7 @@ import {loadConfig, AppConfig} from "./config.js";
 import {AppContext} from "./context.js";
 import {registerActionRoutes} from "./routes/actionRoutes.js";
 import {registerAuthRoutes} from "./routes/authRoutes.js";
+import {registerPortalRoutes} from "./routes/portalRoutes.js";
 import {registerSessionRoutes} from "./routes/sessionRoutes.js";
 import {registerWorkflowRoutes} from "./routes/workflowRoutes.js";
 import {ActionExecutionStore} from "./stores/ActionExecutionStore.js";
@@ -157,6 +158,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   });
 
   await registerAuthRoutes(app, context);
+  await registerPortalRoutes(app, context);
   await registerSessionRoutes(app, context);
   await registerActionRoutes(app, context);
   await registerWorkflowRoutes(app, context);

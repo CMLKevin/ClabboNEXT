@@ -6,6 +6,14 @@ Policy-driven external agent ingress for Clabo with proprietary Clabbo auth (`cl
 
 - `GET /api/agent/v1/health`
 - `GET /api/agent/v1/ready`
+- `GET /portal` (human browser portal)
+- `GET /api/portal/v1/config`
+- `POST /api/portal/v1/login`
+- `POST /api/portal/v1/logout`
+- `GET /api/portal/v1/me`
+- `POST /api/portal/v1/session/start`
+- `GET /api/portal/v1/session/status?session_id=<uuid>`
+- `POST /api/portal/v1/session/end`
 - `GET /api/agent/v1/auth/config`
 - `POST /api/agent/v1/auth/token/issue` (internal key required, optional by config)
 - `POST /api/agent/v1/auth/token/introspect` (internal key required)
@@ -51,6 +59,20 @@ Before `--prod`, set your Vercel project Root Directory to `services/agent-gatew
 
 ## Auth environment variables
 
+- `CLABO_PUBLIC_URL`
+- `CLABO_APP_NAME`
+- `CLABO_HUMAN_PORTAL_ENABLED`
+- `CLABO_HUMAN_PORTAL_TITLE`
+- `CLABO_HUMAN_PORTAL_GAME_URL`
+- `CLABO_HUMAN_PORTAL_ALLOW_EMBED`
+- `CLABO_HUMAN_PORTAL_ACCESS_CODES`
+- `CLABO_HUMAN_PORTAL_DEFAULT_WORKSPACE_ID`
+- `CLABO_HUMAN_PORTAL_ALLOWED_WORKSPACE_IDS`
+- `CLABO_HUMAN_PORTAL_SESSION_TTL_SECONDS`
+- `CLABO_HUMAN_PORTAL_COOKIE_NAME`
+- `CLABO_HUMAN_PORTAL_SESSION_SECRET`
+- `CLABO_HUMAN_PORTAL_ISSUED_TRUST_TIER`
+- `CLABO_HUMAN_PORTAL_ISSUED_CAPABILITIES`
 - `CLABO_AUTH_HEADER_NAME`
 - `CLABO_AUTH_ISSUER`
 - `CLABO_AUTH_AUDIENCE`
@@ -78,6 +100,9 @@ Before `--prod`, set your Vercel project Root Directory to `services/agent-gatew
 
 ## Notes
 
+- Human portal uses invite-code login and signed HTTP-only cookies.
+- In production, default portal code `clabbo-demo-access` is rejected at startup.
+- Set `CLABO_HUMAN_PORTAL_GAME_URL` to the Nitro/game client origin so users can launch gameplay.
 - Default auth header: `X-Clabbo-Agent-Identity`
 - Token format: `clb1.<kid>.<payload>.<signature>`
 - Use unique `X-Clabo-Request-Id` for mutation routes.

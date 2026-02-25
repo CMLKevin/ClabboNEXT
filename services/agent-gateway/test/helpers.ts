@@ -10,6 +10,20 @@ export function createTestConfig(overrides: Partial<AppConfig> = {}): AppConfig 
     logLevel: "silent",
     claboPublicUrl: "https://clabo.test",
     claboAppName: "Clabo",
+    humanPortal: {
+      enabled: true,
+      title: "Clabbo Human Portal",
+      gameUrl: "https://game.clabo.test",
+      allowEmbed: true,
+      accessCodes: ["portal-test-access"],
+      defaultWorkspaceId: "workspace-test",
+      allowedWorkspaceIds: ["workspace-test", "workspace-lobby"],
+      sessionTtlSeconds: 3600,
+      cookieName: "clabbo_human_portal",
+      sessionSecret: "portal_session_secret_that_is_long_enough",
+      issuedTrustTier: "external",
+      issuedCapabilities: ["room.chat.send", "room.user.expression", "workspace.read"]
+    },
     auth: {
       headerName: "X-Clabbo-Agent-Identity",
       issuer: "clabbo.test",
@@ -58,6 +72,10 @@ export function createTestConfig(overrides: Partial<AppConfig> = {}): AppConfig 
   return {
     ...base,
     ...overrides,
+    humanPortal: {
+      ...base.humanPortal,
+      ...(overrides.humanPortal ?? {})
+    },
     auth: {
       ...base.auth,
       ...(overrides.auth ?? {})

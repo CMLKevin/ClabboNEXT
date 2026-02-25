@@ -6,6 +6,7 @@ function baseProductionEnv(overrides: Record<string, string> = {}): NodeJS.Proce
   return {
     NODE_ENV: "production",
     CLABO_AUTH_KEYS: "v1:production_secret_that_is_long_enough",
+    CLABO_HUMAN_PORTAL_ENABLED: "false",
     ...overrides
   };
 }
@@ -67,5 +68,19 @@ describe("production readiness config guards", () => {
         })
       )
     ).toThrow(/cannot exceed CLABO_REQUEST_EXECUTION_BUDGET_MS/);
+  });
+
+  it("rejects default human portal access code in production", () => {
+    expect(() =>
+      loadConfig(
+        baseProductionEnv({
+          REDIS_URL: "redis://localhost:6379",
+          CLABO_ACTION_DRIVER: "http-bridge",
+          CLABO_ACTION_BRIDGE_URL: "https://bridge.clabbo.example",
+          CLABO_HUMAN_PORTAL_ENABLED: "true",
+          CLABO_HUMAN_PORTAL_ACCESS_CODES: "clabbo-demo-access"
+        })
+      )
+    ).toThrow(/default CLABO_HUMAN_PORTAL_ACCESS_CODES/);
   });
 });
