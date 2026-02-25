@@ -1,107 +1,78 @@
 ---
 name: clabo-external-agent-connector
-description: Use when onboarding or connecting any external agent (Codex, Claude Code, OpenCode, Amp, or similar) to Clabo with secure-by-default identity, scoped permissions, and runtime isolation.
+description: One unified secure connection skill for onboarding any external agent (Codex, Claude Code, OpenCode, Amp, custom runtimes) to Clabo with proprietary Clabbo auth, capability-scoped sessions, and runtime-isolated execution.
 ---
 
 # Clabo External Agent Connector
 
-Use this skill whenever an external agent needs to connect to Clabo.
+Use this single skill whenever any external or partner agent connects to Clabo.
 
-## Scope
+## Security baseline
 
-This is one unified workflow for:
+1. Use short-lived Clabbo `clb1` identity tokens only.
+2. Bind each token to exactly one workspace.
+3. Grant minimal capabilities.
+4. Use E2B for untrusted external agents.
+5. Audit all mutations.
 
-- Codex
-- Claude Code
-- OpenCode
-- Amp
-- Any other external agent runtime
+## Required env
 
-## Security Baseline (Do Not Skip)
+- `CLABO_BASE_URL`
+- `CLABO_WORKSPACE_ID`
+- `CLABO_AGENT_IDENTITY_TOKEN`
+- `CLABO_CAPABILITIES`
+- `CLABO_RUNTIME_TARGET` (`auto` recommended)
 
-1. Use short-lived access tokens only (5-15 minute TTL).
-2. Bind token to one workspace (`CLABO_WORKSPACE_ID`).
-3. Grant minimum capabilities only.
-4. Run untrusted external agents in isolated E2B sandboxes.
-5. Enforce egress allowlist and audit all actions.
+## Required headers
 
-Read contract first:
-- `docs/agents/clabo-secure-connection-contract.md`
-
-## Required Inputs
-
-- Agent type (`codex`, `claude-code`, `opencode`, `amp`, `other`)
-- Workspace ID
-- Capability set (for example: `read_code,write_code,run_tests`)
-- Clabo base URL
-- Runtime target (`e2b` or `internal-worker`)
+- `X-Clabo-Workspace-Id: <CLABO_WORKSPACE_ID>`
+- `X-Clabo-Request-Id: <unique-id>`
+- `X-Clabbo-Agent-Identity: <CLABO_AGENT_IDENTITY_TOKEN>`
 
 ## Workflow
 
-### Step 1: Decide runtime
+### 1) Choose runtime
 
-- If agent is external/untrusted: use E2B.
-- If internal trusted automation: internal worker runtime is allowed by policy.
+- External/untrusted: E2B.
+- Internal trusted automation: internal-worker only if policy allows.
+- Prefer `runtime_target=auto`.
 
-### Step 2: Issue ephemeral credentials
+### 2) Issue identity token
 
-- Mint `CLABO_ACCESS_TOKEN` from your broker.
-- Set required env:
-  - `CLABO_BASE_URL`
-  - `CLABO_WORKSPACE_ID`
-  - `CLABO_AGENT_ID`
-  - `CLABO_ACCESS_TOKEN`
-  - `CLABO_CAPABILITIES`
+- Internal broker calls:
+  - `POST /api/agent/v1/auth/token/issue`
+- Store token only in env variables.
 
-### Step 3: Run preflight
-
-Run:
+### 3) Run preflight
 
 ```bash
 bash skills/clabo-external-agent-connector/scripts/preflight.sh
 ```
 
 Expected:
-- Health endpoint reachable
-- Session validation successful
-- Workspace and capability checks accepted
 
-### Step 4: Apply agent-specific launch template
+- Health and readiness pass.
+- Session validation passes.
 
-- For E2B use the appropriate agent template from E2B docs, then inject the same secure env variables.
-- Keep launch command non-interactive and reproducible.
+### 4) Start and run session
 
-### Step 5: Enforce guardrails
+- `POST /api/agent/v1/session/start`
+- Execute actions and workflows.
+- Poll execution state as needed.
 
-- Reject actions outside token capabilities.
-- Reject actions outside workspace scope.
-- Rotate token on long-running sessions.
-- Emit audit events for every mutation call.
+### 5) End session
 
-## Agent-Specific Notes
+- `POST /api/agent/v1/session/end`
 
-### Codex
-- Use Codex-compatible E2B template.
-- Pass credentials as environment variables, never in prompt text.
+## Async worker callback
 
-### Claude Code
-- Use Claude Code template and same env contract.
-- Disable broad outbound network unless explicitly required.
+For queued action drivers:
 
-### OpenCode
-- Use OpenCode template and same env contract.
-- Keep filesystem scope to assigned project path.
-
-### Amp
-- Use Amp template and same env contract.
-- Require explicit capability for deployment operations.
-
-### Other agents
-- Reuse the same env contract and preflight.
-- If no native E2B template exists, run inside a generic secure E2B sandbox with the same policy.
+- Worker reports execution updates through:
+  - `POST /api/agent/v1/actions/executions/:executionId/report`
+- Requires `X-Clabo-Internal-Key`.
 
 ## References
 
 - [E2B docs](https://e2b.dev/docs)
-- [E2B agents](https://e2b.dev/docs/agents)
 - [E2B secure access](https://e2b.dev/docs/sandbox/secure-access)

@@ -26,3 +26,5 @@ assets/roomitemtypes.json
 assets/wallitemtypes.json
 atomcms/gamedata/*
 !atomcms/gamedata/.gitkeep
+**/node_modules/
+services/agent-gateway/dist/

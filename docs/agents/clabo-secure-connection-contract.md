@@ -2,58 +2,71 @@
 
 ## Purpose
 
-Define one secure, reusable contract for any external coding agent connecting to Clabo.
+Define one secure, reusable contract for any external agent connecting to Clabo for sessions, actions, and workflows.
 
 ## Required Security Controls
 
-1. **Ephemeral identity only**
-   - Agents receive short-lived access tokens (recommended TTL: 5-15 minutes).
-   - No long-lived static API keys inside prompts, sandboxes, or repos.
-2. **Workspace-scoped authorization**
-   - Every token is bound to exactly one `workspace_id`.
-   - Cross-workspace operations are rejected by default.
-3. **Least-privilege capabilities**
-   - Capabilities are explicit (`read_code`, `write_code`, `run_tests`, `deploy_preview`).
-   - Write/deploy scopes are opt-in, never default.
-4. **Egress restrictions**
-   - Runtime egress is allowlisted (Clabo API + required package registries only).
-   - Direct arbitrary outbound networking is blocked unless policy allows it.
-5. **Auditability**
-   - All tool calls and mutations include: `agent_id`, `workspace_id`, `request_id`, `trace_id`.
+1. Proprietary Clabbo identity tokens only
+   - Use short-lived `clb1` tokens signed by Clabbo-controlled keys.
+   - Never embed long-lived static secrets in prompts or repos.
+2. Workspace-scoped authorization
+   - Each token is bound to exactly one `workspace_id` claim.
+   - Cross-workspace requests are rejected.
+3. Least-privilege capabilities
+   - Capability scopes are explicit and auditable.
+4. Mutation replay protection
+   - Mutation routes require unique `X-Clabo-Request-Id`.
+5. Auditability
+   - All session/action/workflow mutation paths emit audit events.
 
 ## Runtime Guidance
 
-- Untrusted external agents run in isolated E2B sandboxes.
-- Trusted internal automations may use pooled workers if policy allows.
-- Both runtime types must use the same token and capability contract.
+- Untrusted external agents: E2B sandbox runtime.
+- Trusted internal automation: internal-worker runtime if policy allows.
+- Prefer `runtime_target=auto` so gateway policy resolves target.
 
 ## Required Environment Variables
 
 - `CLABO_BASE_URL`
 - `CLABO_WORKSPACE_ID`
-- `CLABO_AGENT_ID`
-- `CLABO_ACCESS_TOKEN`
-- `CLABO_CAPABILITIES` (comma-separated)
+- `CLABO_CAPABILITIES`
+- `CLABO_AGENT_IDENTITY_TOKEN`
+- `CLABO_REQUEST_ID`
+
+## Required Headers
+
+- `X-Clabo-Workspace-Id: <CLABO_WORKSPACE_ID>`
+- `X-Clabo-Request-Id: <unique-id>`
+- `X-Clabbo-Agent-Identity: <CLABO_AGENT_IDENTITY_TOKEN>`
+
+Optional internal header:
+
+- `X-Clabo-Internal-Key: <internal-service-key>`
 
 ## Minimum API Handshake
 
-1. Agent performs health check:
-   - `GET /api/agent/v1/health`
-2. Agent validates session:
-   - `POST /api/agent/v1/session/validate`
-3. Agent starts work session:
-   - `POST /api/agent/v1/session/start`
+1. `GET /api/agent/v1/health`
+2. `GET /api/agent/v1/ready`
+3. `POST /api/agent/v1/session/validate`
+4. `POST /api/agent/v1/session/start`
+5. `GET /api/agent/v1/session/status?session_id=<id>`
+6. `POST /api/agent/v1/session/end`
 
-All authenticated requests use:
+## Auth Operations
 
-- `Authorization: Bearer <CLABO_ACCESS_TOKEN>`
-- `X-Clabo-Workspace-Id: <CLABO_WORKSPACE_ID>`
-- `X-Clabo-Agent-Id: <CLABO_AGENT_ID>`
-- `X-Clabo-Request-Id: <unique-id>`
+- `GET /api/agent/v1/auth/config`
+- `POST /api/agent/v1/auth/token/issue` (internal key + enabled setting)
+- `POST /api/agent/v1/auth/token/introspect` (internal key)
+
+## Token Format
+
+- Scheme: `clb1`
+- Structure: `clb1.<kid>.<payload>.<signature>`
+- Signature: HMAC-SHA256 over `version.kid.payload`
 
 ## Failure Policy
 
-- Invalid or expired token: hard fail, request fresh token from broker.
-- Missing capability: hard fail, do not auto-escalate.
-- Workspace mismatch: hard fail and audit event.
-- Sandbox compromise suspicion: revoke token + terminate runtime.
+- Invalid token signature/claims: hard fail.
+- Missing capability: hard fail.
+- Workspace mismatch: hard fail and audit.
+- Session owner mismatch: hard fail unless internal key is authorized.

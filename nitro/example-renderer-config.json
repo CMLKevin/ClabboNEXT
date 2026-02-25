@@ -5,6 +5,7 @@
     "socket.auto.reconnect.base.delay.ms": 1500,
     "socket.auto.reconnect.max.delay.ms": 15000,
     "socket.auto.reconnect.jitter.ratio": 0.2,
+    "legacy.external.interface.allowed.origins": [ "http://127.0.0.1:3000" ],
     "asset.url": "http://127.0.0.1:8080/assets",
     "image.library.url": "http://127.0.0.1:8080/swf/c_images/",
     "hof.furni.url": "http://127.0.0.1:8080/swf/dcr/hof_furni/",

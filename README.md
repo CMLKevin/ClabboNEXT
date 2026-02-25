@@ -259,3 +259,45 @@ docker compose exec backup backup-now
 ```bash
 7z a -mx=9 nitro-$(date -d "today" +"%Y%m%d_%H%M").7z ./ '-x!db/data' '-x!.git/' '-x!logs/' '-x!cache/'
 ```
+
+## Agent Gateway (Optional Control Plane)
+
+The repository includes an optional `agent-gateway` service for external AI agent session validation, runtime policy checks, and audit-safe session lifecycle.
+
+### Run with Docker Compose profile
+
+```bash
+docker compose --profile agents up -d agent-gateway
+```
+
+Default gateway port:
+- `http://127.0.0.1:8787`
+
+Key routes:
+- `GET /api/agent/v1/health`
+- `GET /api/agent/v1/ready`
+- `GET /api/agent/v1/auth/config`
+- `POST /api/agent/v1/auth/token/issue` (internal key + enabled setting)
+- `POST /api/agent/v1/auth/token/introspect` (internal key)
+- `POST /api/agent/v1/session/validate`
+- `POST /api/agent/v1/session/start`
+- `GET /api/agent/v1/session/status?session_id=<uuid>`
+- `POST /api/agent/v1/session/end`
+- `GET /api/agent/v1/actions/catalog`
+- `POST /api/agent/v1/actions/execute`
+- `POST /api/agent/v1/actions/batch`
+- `GET /api/agent/v1/actions/executions/:executionId`
+- `POST /api/agent/v1/actions/executions/:executionId/report` (internal key required)
+- `GET /api/agent/v1/workflows/catalog`
+- `POST /api/agent/v1/workflows/execute`
+- `POST /api/agent/v1/workflows/dispatch` (durable async queue)
+- `GET /api/agent/v1/workflows/executions/:workflowExecutionId`
+- `POST /api/agent/v1/internal/workflows/drain` (internal key or cron secret)
+- `GET /api/agent/v1/internal/workflows/cron` (cron secret; used by Vercel cron)
+
+Runtime guidance:
+- Use `runtime_target=auto` for external agents unless you need explicit routing.
+- Keep `CLABO_REQUIRE_E2B_FOR_EXTERNAL=true` for untrusted agents.
+- For async action drivers (`redis-stream`/queued bridges), workers should finalize execution via the report endpoint.
+- For durable workflow orchestration, use `POST /workflows/dispatch` and let the drain/cron routes execute queued jobs.
+- Default identity header is `X-Clabbo-Agent-Identity` with proprietary `clb1` token format.

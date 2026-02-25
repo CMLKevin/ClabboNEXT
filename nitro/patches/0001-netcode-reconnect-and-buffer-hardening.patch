@@ -1,8 +1,8 @@
 diff --git a/apps/frontend/public/renderer-config.json.example b/apps/frontend/public/renderer-config.json.example
-index 95dd548..aafd75c 100644
+index 95dd548..73bc093 100644
 --- a/apps/frontend/public/renderer-config.json.example
 +++ b/apps/frontend/public/renderer-config.json.example
-@@ -1,5 +1,10 @@
+@@ -1,5 +1,11 @@
  {
      "socket.url": "wss://ws.website.com:2096",
 +    "socket.auto.reconnect.enabled": true,
@@ -10,6 +10,7 @@ index 95dd548..aafd75c 100644
 +    "socket.auto.reconnect.base.delay.ms": 1500,
 +    "socket.auto.reconnect.max.delay.ms": 15000,
 +    "socket.auto.reconnect.jitter.ratio": 0.2,
++    "legacy.external.interface.allowed.origins": [ "https://game.website.com" ],
      "asset.url": "https://website.com",
      "image.library.url": "https://website.com/c_images/",
      "hof.furni.url": "https://website.com/dcr/hof_furni",
@@ -105,8 +106,153 @@ index 3c729ac..06ec954 100644
  
    useMainEvent(Nitro.WEBGL_UNAVAILABLE, handler);
    useMainEvent(Nitro.WEBGL_CONTEXT_LOST, handler);
+diff --git a/apps/frontend/src/components/room/widgets/chat/ChatWidgetMessageView.tsx b/apps/frontend/src/components/room/widgets/chat/ChatWidgetMessageView.tsx
+index 36eef9b..fa951cf 100644
+--- a/apps/frontend/src/components/room/widgets/chat/ChatWidgetMessageView.tsx
++++ b/apps/frontend/src/components/room/widgets/chat/ChatWidgetMessageView.tsx
+@@ -80,7 +80,7 @@ export const ChatWidgetMessageView: FC<ChatWidgetMessageViewProps> = props => {
+           {chat.imageUrl && chat.imageUrl.length > 0 && <div className="user-image" style={{backgroundImage: `url(${chat.imageUrl})`}} />}
+         </div>
+         <div className="chat-content">
+-          <b className="username mr-1" dangerouslySetInnerHTML={{__html: `${chat.username}: `}} />
++          <b className="username mr-1">{chat.username}: </b>
+           <span className="message" dangerouslySetInnerHTML={{__html: `${chat.formattedText}`}} />
+         </div>
+         <div className="pointer" />
+diff --git a/apps/frontend/src/components/room/widgets/chat/ChatWidgetView.tsx b/apps/frontend/src/components/room/widgets/chat/ChatWidgetView.tsx
+index a5eb2d3..0f23581 100644
+--- a/apps/frontend/src/components/room/widgets/chat/ChatWidgetView.tsx
++++ b/apps/frontend/src/components/room/widgets/chat/ChatWidgetView.tsx
+@@ -61,13 +61,15 @@ export const ChatWidgetView: FC<{}> = props => {
+ 
+         if (spaceAvailable < requiredSpace) {
+           setChatMessages(prevValue => {
++            if (!prevValue?.length) return prevValue;
++
+             prevValue.forEach(prevChat => {
+               if (prevChat === chat) return;
+ 
+               prevChat.top -= amount;
+             });
+ 
+-            return prevValue;
++            return [...prevValue];
+           });
+ 
+           removeHiddenChats();
+@@ -87,11 +89,11 @@ export const ChatWidgetView: FC<{}> = props => {
+       elementRef.current.style.height = `${newHeight}px`;
+ 
+       setChatMessages(prevValue => {
+-        if (prevValue) {
+-          prevValue.forEach(chat => (chat.top -= currentHeight - newHeight));
+-        }
++        if (!prevValue?.length) return prevValue;
+ 
+-        return prevValue;
++        prevValue.forEach(chat => (chat.top -= currentHeight - newHeight));
++
++        return [...prevValue];
+       });
+     };
+ 
+@@ -107,6 +109,8 @@ export const ChatWidgetView: FC<{}> = props => {
+   useEffect(() => {
+     const moveAllChatsUp = (amount: number) => {
+       setChatMessages(prevValue => {
++        if (!prevValue?.length) return prevValue;
++
+         prevValue.forEach(chat => {
+           if (chat.skipMovement) {
+             chat.skipMovement = false;
+@@ -117,7 +121,7 @@ export const ChatWidgetView: FC<{}> = props => {
+           chat.top -= amount;
+         });
+ 
+-        return prevValue;
++        return [...prevValue];
+       });
+ 
+       removeHiddenChats();
+diff --git a/apps/frontend/src/hooks/events/useMessageEvent.tsx b/apps/frontend/src/hooks/events/useMessageEvent.tsx
+index f019559..f61e12d 100644
+--- a/apps/frontend/src/hooks/events/useMessageEvent.tsx
++++ b/apps/frontend/src/hooks/events/useMessageEvent.tsx
+@@ -1,15 +1,21 @@
+ import {IMessageEvent, MessageEvent} from "@nitro/renderer";
+-import {useEffect} from "react";
++import {useEffect, useRef} from "react";
+ 
+ import {GetCommunication} from "../../api";
+ 
+ export const useMessageEvent = <T extends IMessageEvent>(eventType: typeof MessageEvent, handler: (event: T) => void) => {
++  const handlerRef = useRef(handler);
++
++  useEffect(() => {
++    handlerRef.current = handler;
++  }, [handler]);
++
+   useEffect(() => {
+-    //@ts-ignore
+-    const event = new eventType(handler);
++    const EventConstructor = eventType as unknown as new (callback: (event: T) => void) => T;
++    const event = new EventConstructor(eventData => handlerRef.current(eventData));
+ 
+     GetCommunication().registerMessageEvent(event);
+ 
+     return () => GetCommunication().removeMessageEvent(event);
+-  }, [eventType, handler]);
++  }, [eventType]);
+ };
+diff --git a/apps/frontend/src/hooks/rooms/widgets/useChatWidget.ts b/apps/frontend/src/hooks/rooms/widgets/useChatWidget.ts
+index a243c5f..b5860bd 100644
+--- a/apps/frontend/src/hooks/rooms/widgets/useChatWidget.ts
++++ b/apps/frontend/src/hooks/rooms/widgets/useChatWidget.ts
+@@ -129,6 +129,8 @@ const useChatWidgetState = () => {
+   };
+ 
+   useRoomSessionManagerEvent<RoomSessionChatEvent>(RoomSessionChatEvent.CHAT_EVENT, event => {
++    if (!roomSession) return;
++
+     const roomObject = GetRoomEngine().getRoomObject(roomSession.roomId, event.objectId, RoomObjectCategory.UNIT);
+     const bubbleLocation = roomObject ? GetRoomObjectScreenLocation(roomSession.roomId, roomObject?.id, RoomObjectCategory.UNIT) : new NitroPoint();
+     const userData = roomObject ? roomSession.userDataManager.getUserDataByIndex(event.objectId) : new RoomUserData(-1);
+@@ -139,7 +141,6 @@ const useChatWidgetState = () => {
+     let chatType = event.chatType;
+     let styleId = event.style;
+     let userType = 0;
+-    let petType = -1;
+     let text = event.message;
+ 
+     if (userData) {
+@@ -150,7 +151,6 @@ const useChatWidgetState = () => {
+       switch (userType) {
+         case RoomObjectType.PET:
+           imageUrl = getPetImage(figure, 2, true, 64, roomObject.model.getValue<string>(RoomObjectVariable.FIGURE_POSTURE));
+-          petType = new PetFigureData(figure).typeId;
+           break;
+         case RoomObjectType.USER:
+           imageUrl = getUserImage(figure);
+@@ -178,7 +178,7 @@ const useChatWidgetState = () => {
+         let textKey = "widget.chatbubble.petrevived";
+ 
+         if (chatType === RoomSessionChatEvent.CHAT_TYPE_PET_REBREED_FERTILIZE) {
+-          textKey = "widget.chatbubble.petrefertilized;";
++          textKey = "widget.chatbubble.petrefertilized";
+         } else if (chatType === RoomSessionChatEvent.CHAT_TYPE_PET_SPEED_FERTILIZE) {
+           textKey = "widget.chatbubble.petspeedfertilized";
+         }
+@@ -188,7 +188,7 @@ const useChatWidgetState = () => {
+         const newRoomObject = GetRoomEngine().getRoomObject(roomSession.roomId, event.extraParam, RoomObjectCategory.UNIT);
+ 
+         if (newRoomObject) {
+-          const newUserData = roomSession.userDataManager.getUserDataByIndex(roomObject.id);
++          const newUserData = roomSession.userDataManager.getUserDataByIndex(newRoomObject.id);
+ 
+           if (newUserData) targetUserName = newUserData.name;
+         }
 diff --git a/libs/renderer/src/core/communication/SocketConnection.ts b/libs/renderer/src/core/communication/SocketConnection.ts
-index 034f054..7ab895d 100644
+index 034f054..9a659e8 100644
 --- a/libs/renderer/src/core/communication/SocketConnection.ts
 +++ b/libs/renderer/src/core/communication/SocketConnection.ts
 @@ -16,6 +16,10 @@ import {EvaWireFormat} from "./codec";
@@ -120,27 +266,31 @@ index 034f054..7ab895d 100644
    private _communicationManager: ICommunicationManager;
    private _stateListener: IConnectionStateListener;
    private _socket: WebSocket;
-@@ -69,6 +73,8 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -69,6 +73,10 @@ export class SocketConnection extends EventDispatcher implements IConnection {
      this._messages = null;
      this._codec = null;
      this._dataBuffer = null;
++    this._isReady = false;
++    this._isAuthenticated = false;
 +    this._pendingClientMessages = [];
 +    this._pendingServerMessages = [];
    }
  
    public onReady(): void {
-@@ -89,8 +95,10 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -89,8 +97,12 @@ export class SocketConnection extends EventDispatcher implements IConnection {
  
      this.destroySocket();
  
++    this._isReady = false;
 +    this._isAuthenticated = false;
      this._dataBuffer = new ArrayBuffer(0);
++    this._pendingServerMessages = [];
      this._socket = new WebSocket(socketUrl);
 +    this._socket.binaryType = "arraybuffer";
  
      this._socket.addEventListener(WebSocketEventEnum.CONNECTION_OPENED, this.onOpen);
      this._socket.addEventListener(WebSocketEventEnum.CONNECTION_CLOSED, this.onClose);
-@@ -106,7 +114,7 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -106,7 +118,7 @@ export class SocketConnection extends EventDispatcher implements IConnection {
      this._socket.removeEventListener(WebSocketEventEnum.CONNECTION_ERROR, this.onError);
      this._socket.removeEventListener(WebSocketEventEnum.CONNECTION_MESSAGE, this.onMessage);
  
@@ -149,17 +299,19 @@ index 034f054..7ab895d 100644
  
      this._socket = null;
    }
-@@ -116,6 +124,9 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -116,6 +128,11 @@ export class SocketConnection extends EventDispatcher implements IConnection {
    }
  
    private onClose(event: Event): void {
++    this._isReady = false;
 +    this._isAuthenticated = false;
 +    this._dataBuffer = new ArrayBuffer(0);
++    this._pendingServerMessages = [];
 +
      this.dispatchConnectionEvent(SocketConnectionEvent.CONNECTION_CLOSED, event);
    }
  
-@@ -128,16 +139,28 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -128,16 +145,28 @@ export class SocketConnection extends EventDispatcher implements IConnection {
      if (!(event instanceof MessageEvent)) return;
  
      //this.dispatchConnectionEvent(SocketConnectionEvent.CONNECTION_MESSAGE, event);
@@ -167,18 +319,18 @@ index 034f054..7ab895d 100644
 +
 +    if (data instanceof ArrayBuffer) {
 +      this.appendIncomingBuffer(data);
- 
--    const reader = new FileReader();
++
 +      return;
 +    }
  
--    reader.readAsArrayBuffer(event.data);
+-    const reader = new FileReader();
 +    if (data instanceof Blob) {
 +      data
 +        .arrayBuffer()
 +        .then(buffer => this.appendIncomingBuffer(buffer))
 +        .catch(error => NitroLogger.error("Unable to read websocket payload", error));
-+
+ 
+-    reader.readAsArrayBuffer(event.data);
 +      return;
 +    }
  
@@ -194,7 +346,7 @@ index 034f054..7ab895d 100644
    }
  
    private dispatchConnectionEvent(type: string, event: Event): void {
-@@ -146,24 +169,24 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -146,24 +175,24 @@ export class SocketConnection extends EventDispatcher implements IConnection {
  
    public authenticated(): void {
      this._isAuthenticated = true;
@@ -226,7 +378,7 @@ index 034f054..7ab895d 100644
        const header = this._messages.getComposerId(composer);
  
        if (header === -1) {
-@@ -183,16 +206,28 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -183,16 +212,28 @@ export class SocketConnection extends EventDispatcher implements IConnection {
  
        NitroLogger.packets("OutgoingComposer", header, composer.constructor.name, message);
  
@@ -245,21 +397,21 @@ index 034f054..7ab895d 100644
 -    if (this._socket.readyState !== WebSocket.OPEN) return;
 +  private write(buffer: ArrayBuffer): boolean {
 +    if (!buffer || !this.isSocketWritable()) return false;
-+
+ 
+-    this._socket.send(buffer);
 +    try {
 +      this._socket.send(buffer);
 +
 +      return true;
 +    } catch (error) {
 +      NitroLogger.error("Failed to send websocket payload", error);
- 
--    this._socket.send(buffer);
++
 +      return false;
 +    }
    }
  
    public processReceivedData(): void {
-@@ -209,9 +244,7 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -209,9 +250,7 @@ export class SocketConnection extends EventDispatcher implements IConnection {
      if (!wrappers || !wrappers.length) return;
  
      if (this._isAuthenticated && !this._isReady) {
@@ -270,7 +422,7 @@ index 034f054..7ab895d 100644
  
        return;
      }
-@@ -250,6 +283,78 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+@@ -250,6 +289,78 @@ export class SocketConnection extends EventDispatcher implements IConnection {
      return array.buffer;
    }
  
@@ -350,7 +502,7 @@ index 034f054..7ab895d 100644
      if (!wrapper) return null;
  
 diff --git a/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts b/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts
-index 58c0e34..6233640 100644
+index 58c0e34..83a86c4 100644
 --- a/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts
 +++ b/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts
 @@ -22,6 +22,16 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
@@ -360,7 +512,7 @@ index 58c0e34..6233640 100644
 +  private _socketUrl: string;
 +  private _reconnectTimer: ReturnType<typeof setTimeout>;
 +  private _reconnectAttempts: number;
-+  private _isDisposed: boolean;
++  private _isShuttingDown: boolean;
 +
 +  private _autoReconnectEnabled: boolean;
 +  private _maxReconnectAttempts: number;
@@ -377,7 +529,7 @@ index 58c0e34..6233640 100644
 +    this._socketUrl = "";
 +    this._reconnectTimer = null;
 +    this._reconnectAttempts = 0;
-+    this._isDisposed = false;
++    this._isShuttingDown = false;
 +
 +    this._autoReconnectEnabled = true;
 +    this._maxReconnectAttempts = -1;
@@ -391,7 +543,7 @@ index 58c0e34..6233640 100644
    protected override onInit(): void {
      if (this._connection) return;
  
-+    this._isDisposed = false;
++    this._isShuttingDown = false;
 +
      Nitro.instance.events.addEventListener(NitroCommunicationDemoEvent.CONNECTION_AUTHENTICATED, this.onConnectionAuthenticatedEvent);
  
@@ -407,7 +559,7 @@ index 58c0e34..6233640 100644
    }
  
    protected override onDispose(): void {
-+    this._isDisposed = true;
++    this._isShuttingDown = true;
 +
 +    this.clearReconnectTimer();
 +
@@ -505,7 +657,7 @@ index 58c0e34..6233640 100644
 +  }
 +
 +  private scheduleReconnect(reason: "closed" | "error"): void {
-+    if (this._isDisposed || !this._connection || !this._autoReconnectEnabled) return;
++    if (this._isShuttingDown || this.disposed || !this._connection || !this._autoReconnectEnabled) return;
 +    if (this._reconnectTimer) return;
 +
 +    if (this._maxReconnectAttempts >= 0 && this._reconnectAttempts >= this._maxReconnectAttempts) {
@@ -524,7 +676,7 @@ index 58c0e34..6233640 100644
 +    this._reconnectTimer = setTimeout(() => {
 +      this._reconnectTimer = null;
 +
-+      if (this._isDisposed || !this._connection) return;
++      if (this._isShuttingDown || this.disposed || !this._connection) return;
 +
 +      this.resolveConnectionSettings();
 +
@@ -565,3 +717,230 @@ index 58c0e34..6233640 100644
    public get demo(): INitroCommunicationDemo {
      return this._demo;
    }
+diff --git a/libs/renderer/src/nitro/externalInterface/LegacyExternalInterface.ts b/libs/renderer/src/nitro/externalInterface/LegacyExternalInterface.ts
+index 5aedfa7..ee00370 100644
+--- a/libs/renderer/src/nitro/externalInterface/LegacyExternalInterface.ts
++++ b/libs/renderer/src/nitro/externalInterface/LegacyExternalInterface.ts
+@@ -1,3 +1,5 @@
++import {NitroConfiguration, NitroLogger} from "../../api";
++
+ declare global {
+   interface Window {
+     FlashExternalInterface?: {
+@@ -29,26 +31,47 @@ declare global {
+   }
+ }
+ 
++interface MessageEnvelope {
++  method: string;
++  params: unknown[];
++}
++
+ export class LegacyExternalInterface {
+   private static readonly MESSAGE_KEY = "Nitro_LegacyExternalInterface";
++  private static readonly GAME_MESSAGE_KEY = "Nitro_LegacyExternalGameInterface";
++
++  private static readonly DEFAULT_ALLOWED_METHODS = new Set<string>([
++    "legacyTrack",
++    "logDebug",
++    "disconnect",
++    "logout",
++    "openWebPageAndMinimizeClient",
++    "heartBeat",
++    "logEventLog",
++    "openPage",
++    "closeWebPageAndRestoreClient",
++    "openHabblet",
++    "closeHabblet",
++    "openExternalLink",
++    "roomVisited",
++    "openMinimail",
++    "openNews",
++    "closeNews",
++    "openAvatars",
++    "openRoomEnterAd",
++    "updateFigure",
++    "showGame",
++    "hideGame"
++  ]);
++
++  private static readonly registeredCallbacks = new Set<string>();
+   private static _isListeningForPostMessages = false;
++  private static _allowedOriginsCache: string[] | null = null;
+ 
+   public static get available(): boolean {
+     if (!this._isListeningForPostMessages) {
+       this._isListeningForPostMessages = true;
+-      window.addEventListener("message", ev => {
+-        if (typeof ev.data !== "string") return;
+-
+-        if (ev.data.startsWith(LegacyExternalInterface.MESSAGE_KEY)) {
+-          const {method, params} = JSON.parse(ev.data.substr(LegacyExternalInterface.MESSAGE_KEY.length));
+-
+-          const fn = (window as any)[method];
+-          if (!fn) return;
+-
+-          fn(...params);
+-          return;
+-        }
+-      });
++      window.addEventListener("message", event => this.handlePostMessage(event));
+     }
+ 
+     return true;
+@@ -63,9 +86,9 @@ export class LegacyExternalInterface {
+         LegacyExternalInterface.MESSAGE_KEY +
+           JSON.stringify({
+             method,
+-            params,
++            params
+           }),
+-        "*"
++        this.getTargetOrigin()
+       );
+     }
+ 
+@@ -82,12 +105,12 @@ export class LegacyExternalInterface {
+   ): ReturnType<(typeof window.FlashExternalGameInterface)[K]> | undefined {
+     if (window.top !== window) {
+       window.top.postMessage(
+-        "Nitro_LegacyExternalGameInterface" +
++        LegacyExternalInterface.GAME_MESSAGE_KEY +
+           JSON.stringify({
+             method,
+-            params,
++            params
+           }),
+-        "*"
++        this.getTargetOrigin()
+       );
+     }
+ 
+@@ -99,6 +122,126 @@ export class LegacyExternalInterface {
+   }
+ 
+   public static addCallback(name: string, func: Function) {
+-    (window as any)[name] = func;
++    if (!name || !/^[a-zA-Z0-9_.-]+$/.test(name)) {
++      NitroLogger.warn("Rejected legacy callback registration with unsafe name", name);
++
++      return;
++    }
++
++    this.registeredCallbacks.add(name);
++    (window as unknown as Record<string, unknown>)[name] = func;
++  }
++
++  private static handlePostMessage(event: MessageEvent): void {
++    if (typeof event.data !== "string") return;
++    if (!this.isAllowedOrigin(event.origin)) {
++      NitroLogger.warn("Ignoring legacy postMessage from disallowed origin", event.origin);
++
++      return;
++    }
++
++    const payload = this.parseEnvelope(event.data, this.MESSAGE_KEY) ?? this.parseEnvelope(event.data, this.GAME_MESSAGE_KEY);
++
++    if (!payload) return;
++    if (!this.canInvokeMethod(payload.method)) {
++      NitroLogger.warn("Ignoring legacy postMessage for non-whitelisted method", payload.method);
++
++      return;
++    }
++
++    const fn = (window as unknown as Record<string, unknown>)[payload.method];
++
++    if (typeof fn !== "function") return;
++
++    try {
++      (fn as (...args: unknown[]) => unknown)(...payload.params);
++    } catch (error) {
++      NitroLogger.error("Legacy postMessage callback execution failed", error);
++    }
++  }
++
++  private static canInvokeMethod(method: string): boolean {
++    if (!method || !/^[a-zA-Z0-9_.-]+$/.test(method)) return false;
++
++    return this.DEFAULT_ALLOWED_METHODS.has(method) || this.registeredCallbacks.has(method);
++  }
++
++  private static parseEnvelope(raw: string, key: string): MessageEnvelope | null {
++    if (!raw.startsWith(key)) return null;
++
++    try {
++      const parsed = JSON.parse(raw.slice(key.length)) as Partial<MessageEnvelope>;
++
++      if (!parsed || typeof parsed !== "object") return null;
++      if (typeof parsed.method !== "string") return null;
++      if (!Array.isArray(parsed.params)) return null;
++
++      return {
++        method: parsed.method,
++        params: parsed.params
++      };
++    } catch {
++      return null;
++    }
++  }
++
++  private static getAllowedOrigins(): string[] {
++    if (this._allowedOriginsCache) return this._allowedOriginsCache;
++
++    const origins = new Set<string>();
++    const configured = NitroConfiguration.getValue<unknown>("legacy.external.interface.allowed.origins", []);
++
++    const addOrigin = (value: unknown) => {
++      if (typeof value !== "string") return;
++
++      const trimmed = value.trim();
++
++      if (!trimmed.length) return;
++      if (trimmed === "*") {
++        origins.add("*");
++        return;
++      }
++
++      try {
++        origins.add(new URL(trimmed).origin);
++      } catch {
++        NitroLogger.warn("Skipping invalid legacy origin config", trimmed);
++      }
++    };
++
++    if (Array.isArray(configured)) {
++      configured.forEach(addOrigin);
++    } else if (typeof configured === "string") {
++      configured
++        .split(",")
++        .map(part => part.trim())
++        .forEach(addOrigin);
++    }
++
++    if (typeof window !== "undefined" && window.location?.origin) {
++      origins.add(window.location.origin);
++    }
++
++    this._allowedOriginsCache = Array.from(origins);
++
++    return this._allowedOriginsCache;
++  }
++
++  private static isAllowedOrigin(origin: string): boolean {
++    const allowed = this.getAllowedOrigins();
++
++    if (!allowed.length) return false;
++    if (allowed.includes("*")) return true;
++
++    return allowed.includes(origin);
++  }
++
++  private static getTargetOrigin(): string {
++    const allowed = this.getAllowedOrigins();
++
++    if (!allowed.length) return "*";
++    if (allowed.includes("*")) return "*";
++
++    return allowed[0];
+   }
+ }
