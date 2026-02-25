@@ -65,6 +65,8 @@ Before `--prod`, set your Vercel project Root Directory to `services/agent-gatew
 - `CLABO_ALLOW_IN_MEMORY_STATE_IN_PRODUCTION`
 - `CLABO_ALLOW_NOOP_ACTION_DRIVER_IN_PRODUCTION`
 - `REDIS_URL`
+- `UPSTASH_REDIS_REST_URL` (optional compatibility env for REST workers/tooling)
+- `UPSTASH_REDIS_REST_TOKEN` (optional compatibility env for REST workers/tooling)
 - `CLABO_WORKFLOW_QUEUE_KEY`
 - `CLABO_WORKFLOW_QUEUE_LOCK_SECONDS`
 - `CLABO_WORKFLOW_DRAIN_MAX_ITEMS`
