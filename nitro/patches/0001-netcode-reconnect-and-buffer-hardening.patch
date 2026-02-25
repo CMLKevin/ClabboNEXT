@@ -1,0 +1,567 @@
+diff --git a/apps/frontend/public/renderer-config.json.example b/apps/frontend/public/renderer-config.json.example
+index 95dd548..aafd75c 100644
+--- a/apps/frontend/public/renderer-config.json.example
++++ b/apps/frontend/public/renderer-config.json.example
+@@ -1,5 +1,10 @@
+ {
+     "socket.url": "wss://ws.website.com:2096",
++    "socket.auto.reconnect.enabled": true,
++    "socket.auto.reconnect.max.attempts": -1,
++    "socket.auto.reconnect.base.delay.ms": 1500,
++    "socket.auto.reconnect.max.delay.ms": 15000,
++    "socket.auto.reconnect.jitter.ratio": 0.2,
+     "asset.url": "https://website.com",
+     "image.library.url": "https://website.com/c_images/",
+     "hof.furni.url": "https://website.com/dcr/hof_furni",
+diff --git a/apps/frontend/src/App.tsx b/apps/frontend/src/App.tsx
+index 3c729ac..06ec954 100644
+--- a/apps/frontend/src/App.tsx
++++ b/apps/frontend/src/App.tsx
+@@ -29,6 +29,7 @@ export const App: FC<{}> = props => {
+   const [percent, setPercent] = useState(0);
+   const [imageRendering, setImageRendering] = useState<boolean>(true);
+   const [uiFPSCounter, setUiFPSCounter] = useUiFPSCounter();
++  const increaseProgress = useCallback((delta: number) => setPercent(prevValue => Math.min(100, prevValue + delta)), []);
+ 
+   if (!GetNitroInstance()) {
+     //@ts-ignore
+@@ -41,7 +42,7 @@ export const App: FC<{}> = props => {
+     switch (event.type) {
+       case ConfigurationEvent.LOADED:
+         GetNitroInstance().localization.init();
+-        setPercent(prevValue => prevValue + 20);
++        increaseProgress(20);
+         return;
+       case ConfigurationEvent.FAILED:
+         setIsError(true);
+@@ -58,20 +59,30 @@ export const App: FC<{}> = props => {
+         setTimeout(() => window.location.reload(), 1500);
+         return;
+       case NitroCommunicationDemoEvent.CONNECTION_HANDSHAKING:
+-        setPercent(prevValue => prevValue + 20);
++        setIsError(false);
++        setMessage("Connecting");
++        increaseProgress(20);
+         return;
+       case NitroCommunicationDemoEvent.CONNECTION_HANDSHAKE_FAILED:
+         setIsError(true);
+         setMessage("Handshake Failed");
+         return;
+       case NitroCommunicationDemoEvent.CONNECTION_AUTHENTICATED:
+-        setPercent(prevValue => prevValue + 20);
++        setIsError(false);
++        setMessage("Authenticated");
++        increaseProgress(20);
+ 
+         GetNitroInstance().init();
+ 
+         if (LegacyExternalInterface.available) LegacyExternalInterface.call("legacyTrack", "authentication", "authok", []);
+         return;
+       case NitroCommunicationDemoEvent.CONNECTION_ERROR:
++        if (GetConfiguration<boolean>("socket.auto.reconnect.enabled", true)) {
++          setMessage("Connection interrupted - retrying");
++
++          return;
++        }
++
+         setIsError(true);
+         setMessage("Connection Error");
+         return;
+@@ -81,11 +92,17 @@ export const App: FC<{}> = props => {
+ 
+         HabboWebTools.send(-1, "client.init.handshake.fail");
+ 
++        if (GetConfiguration<boolean>("socket.auto.reconnect.enabled", true)) {
++          setMessage("Connection closed - retrying");
++
++          return;
++        }
++
+         setIsError(true);
+-        setMessage("Server closed Connection");
++        setMessage("Server closed connection");
+         return;
+       case RoomEngineEvent.ENGINE_INITIALIZED:
+-        setPercent(prevValue => prevValue + 20);
++        increaseProgress(20);
+ 
+         setTimeout(() => setIsReady(true), 300);
+         return;
+@@ -100,7 +117,7 @@ export const App: FC<{}> = props => {
+         if (status) {
+           GetCommunication().init();
+ 
+-          setPercent(prevValue => prevValue + 20);
++          increaseProgress(20);
+         } else {
+           setIsError(true);
+           setMessage("Assets Failed");
+@@ -108,7 +125,7 @@ export const App: FC<{}> = props => {
+         return;
+       }
+     }
+-  }, []);
++  }, [increaseProgress]);
+ 
+   useMainEvent(Nitro.WEBGL_UNAVAILABLE, handler);
+   useMainEvent(Nitro.WEBGL_CONTEXT_LOST, handler);
+diff --git a/libs/renderer/src/core/communication/SocketConnection.ts b/libs/renderer/src/core/communication/SocketConnection.ts
+index 034f054..7ab895d 100644
+--- a/libs/renderer/src/core/communication/SocketConnection.ts
++++ b/libs/renderer/src/core/communication/SocketConnection.ts
+@@ -16,6 +16,10 @@ import {EvaWireFormat} from "./codec";
+ import {MessageClassManager} from "./messages";
+ 
+ export class SocketConnection extends EventDispatcher implements IConnection {
++  private static readonly MAX_BUFFER_BYTES = 8 * 1024 * 1024;
++  private static readonly MAX_PENDING_CLIENT_MESSAGES = 500;
++  private static readonly MAX_PENDING_SERVER_MESSAGES = 1000;
++
+   private _communicationManager: ICommunicationManager;
+   private _stateListener: IConnectionStateListener;
+   private _socket: WebSocket;
+@@ -69,6 +73,8 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+     this._messages = null;
+     this._codec = null;
+     this._dataBuffer = null;
++    this._pendingClientMessages = [];
++    this._pendingServerMessages = [];
+   }
+ 
+   public onReady(): void {
+@@ -89,8 +95,10 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+ 
+     this.destroySocket();
+ 
++    this._isAuthenticated = false;
+     this._dataBuffer = new ArrayBuffer(0);
+     this._socket = new WebSocket(socketUrl);
++    this._socket.binaryType = "arraybuffer";
+ 
+     this._socket.addEventListener(WebSocketEventEnum.CONNECTION_OPENED, this.onOpen);
+     this._socket.addEventListener(WebSocketEventEnum.CONNECTION_CLOSED, this.onClose);
+@@ -106,7 +114,7 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+     this._socket.removeEventListener(WebSocketEventEnum.CONNECTION_ERROR, this.onError);
+     this._socket.removeEventListener(WebSocketEventEnum.CONNECTION_MESSAGE, this.onMessage);
+ 
+-    if (this._socket.readyState === WebSocket.OPEN) this._socket.close();
++    if (this._socket.readyState === WebSocket.OPEN || this._socket.readyState === WebSocket.CONNECTING) this._socket.close();
+ 
+     this._socket = null;
+   }
+@@ -116,6 +124,9 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+   }
+ 
+   private onClose(event: Event): void {
++    this._isAuthenticated = false;
++    this._dataBuffer = new ArrayBuffer(0);
++
+     this.dispatchConnectionEvent(SocketConnectionEvent.CONNECTION_CLOSED, event);
+   }
+ 
+@@ -128,16 +139,28 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+     if (!(event instanceof MessageEvent)) return;
+ 
+     //this.dispatchConnectionEvent(SocketConnectionEvent.CONNECTION_MESSAGE, event);
++    const data = event.data;
++
++    if (data instanceof ArrayBuffer) {
++      this.appendIncomingBuffer(data);
+ 
+-    const reader = new FileReader();
++      return;
++    }
+ 
+-    reader.readAsArrayBuffer(event.data);
++    if (data instanceof Blob) {
++      data
++        .arrayBuffer()
++        .then(buffer => this.appendIncomingBuffer(buffer))
++        .catch(error => NitroLogger.error("Unable to read websocket payload", error));
++
++      return;
++    }
+ 
+-    reader.onloadend = () => {
+-      this._dataBuffer = this.concatArrayBuffers(this._dataBuffer, reader.result as ArrayBuffer);
++    if (typeof data === "string") {
++      const encoded = new TextEncoder().encode(data);
+ 
+-      this.processReceivedData();
+-    };
++      this.appendIncomingBuffer(encoded.buffer);
++    }
+   }
+ 
+   private dispatchConnectionEvent(type: string, event: Event): void {
+@@ -146,24 +169,24 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+ 
+   public authenticated(): void {
+     this._isAuthenticated = true;
++
++    if (this._isReady) this.flushPendingMessages();
+   }
+ 
+   public send(...composers: IMessageComposer<unknown[]>[]): boolean {
+     if (this.disposed || !composers) return false;
+ 
+-    composers = [...composers];
++    const filteredComposers = composers.filter(composer => !!composer);
+ 
+-    if (this._isAuthenticated && !this._isReady) {
+-      if (!this._pendingClientMessages) this._pendingClientMessages = [];
++    if (!filteredComposers.length) return false;
+ 
+-      this._pendingClientMessages.push(...composers);
++    if (!this.isSocketWritable() || (this._isAuthenticated && !this._isReady)) {
++      this.enqueueClientMessages(...filteredComposers);
+ 
+       return false;
+     }
+ 
+-    for (const composer of composers) {
+-      if (!composer) continue;
+-
++    for (const composer of filteredComposers) {
+       const header = this._messages.getComposerId(composer);
+ 
+       if (header === -1) {
+@@ -183,16 +206,28 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+ 
+       NitroLogger.packets("OutgoingComposer", header, composer.constructor.name, message);
+ 
+-      this.write(encoded.getBuffer());
++      if (!this.write(encoded.getBuffer())) {
++        this.enqueueClientMessages(composer);
++
++        return false;
++      }
+     }
+ 
+     return true;
+   }
+ 
+-  private write(buffer: ArrayBuffer): void {
+-    if (this._socket.readyState !== WebSocket.OPEN) return;
++  private write(buffer: ArrayBuffer): boolean {
++    if (!buffer || !this.isSocketWritable()) return false;
++
++    try {
++      this._socket.send(buffer);
++
++      return true;
++    } catch (error) {
++      NitroLogger.error("Failed to send websocket payload", error);
+ 
+-    this._socket.send(buffer);
++      return false;
++    }
+   }
+ 
+   public processReceivedData(): void {
+@@ -209,9 +244,7 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+     if (!wrappers || !wrappers.length) return;
+ 
+     if (this._isAuthenticated && !this._isReady) {
+-      if (!this._pendingServerMessages) this._pendingServerMessages = [];
+-
+-      this._pendingServerMessages.push(...wrappers);
++      this.enqueueServerMessages(...wrappers);
+ 
+       return;
+     }
+@@ -250,6 +283,78 @@ export class SocketConnection extends EventDispatcher implements IConnection {
+     return array.buffer;
+   }
+ 
++  private appendIncomingBuffer(buffer: ArrayBuffer): void {
++    if (!buffer || !buffer.byteLength) return;
++
++    this._dataBuffer = this.concatArrayBuffers(this._dataBuffer || new ArrayBuffer(0), buffer);
++
++    if (this._dataBuffer.byteLength > SocketConnection.MAX_BUFFER_BYTES) {
++      NitroLogger.error("Dropping connection due to oversized websocket buffer", this._dataBuffer.byteLength);
++
++      this._dataBuffer = new ArrayBuffer(0);
++
++      if (this._socket && (this._socket.readyState === WebSocket.OPEN || this._socket.readyState === WebSocket.CONNECTING)) {
++        this._socket.close(1009, "buffer limit exceeded");
++      }
++
++      return;
++    }
++
++    this.processReceivedData();
++  }
++
++  private enqueueClientMessages(...composers: IMessageComposer<unknown[]>[]): void {
++    if (!composers || !composers.length) return;
++    if (!this._pendingClientMessages) this._pendingClientMessages = [];
++
++    this._pendingClientMessages.push(...composers);
++
++    if (this._pendingClientMessages.length > SocketConnection.MAX_PENDING_CLIENT_MESSAGES) {
++      const extraItems = this._pendingClientMessages.length - SocketConnection.MAX_PENDING_CLIENT_MESSAGES;
++
++      this._pendingClientMessages.splice(0, extraItems);
++
++      NitroLogger.warn(`Client message queue trimmed by ${extraItems} items`);
++    }
++  }
++
++  private enqueueServerMessages(...wrappers: IMessageDataWrapper[]): void {
++    if (!wrappers || !wrappers.length) return;
++    if (!this._pendingServerMessages) this._pendingServerMessages = [];
++
++    this._pendingServerMessages.push(...wrappers);
++
++    if (this._pendingServerMessages.length > SocketConnection.MAX_PENDING_SERVER_MESSAGES) {
++      const extraItems = this._pendingServerMessages.length - SocketConnection.MAX_PENDING_SERVER_MESSAGES;
++
++      this._pendingServerMessages.splice(0, extraItems);
++
++      NitroLogger.warn(`Server message queue trimmed by ${extraItems} items`);
++    }
++  }
++
++  private flushPendingMessages(): void {
++    if (this._pendingServerMessages && this._pendingServerMessages.length) {
++      const pendingServer = [...this._pendingServerMessages];
++
++      this._pendingServerMessages = [];
++
++      this.processWrappers(...pendingServer);
++    }
++
++    if (this._pendingClientMessages && this._pendingClientMessages.length) {
++      const pendingClient = [...this._pendingClientMessages];
++
++      this._pendingClientMessages = [];
++
++      this.send(...pendingClient);
++    }
++  }
++
++  private isSocketWritable(): boolean {
++    return !!this._socket && this._socket.readyState === WebSocket.OPEN;
++  }
++
+   private getMessagesForWrapper(wrapper: IMessageDataWrapper): IMessageEvent[] {
+     if (!wrapper) return null;
+ 
+diff --git a/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts b/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts
+index 58c0e34..6233640 100644
+--- a/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts
++++ b/libs/renderer/src/nitro/communication/NitroCommunicationManager.ts
+@@ -22,6 +22,16 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
+   private _messages: IMessageConfiguration;
+ 
+   private _demo: INitroCommunicationDemo;
++  private _socketUrl: string;
++  private _reconnectTimer: ReturnType<typeof setTimeout>;
++  private _reconnectAttempts: number;
++  private _isDisposed: boolean;
++
++  private _autoReconnectEnabled: boolean;
++  private _maxReconnectAttempts: number;
++  private _baseReconnectDelayMs: number;
++  private _maxReconnectDelayMs: number;
++  private _reconnectJitterRatio: number;
+ 
+   constructor(communication: ICommunicationManager) {
+     super();
+@@ -31,6 +41,16 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
+     this._messages = new NitroMessages();
+ 
+     this._demo = new NitroCommunicationDemo(this);
++    this._socketUrl = "";
++    this._reconnectTimer = null;
++    this._reconnectAttempts = 0;
++    this._isDisposed = false;
++
++    this._autoReconnectEnabled = true;
++    this._maxReconnectAttempts = -1;
++    this._baseReconnectDelayMs = 1500;
++    this._maxReconnectDelayMs = 15000;
++    this._reconnectJitterRatio = 0.2;
+ 
+     this.onConnectionOpenedEvent = this.onConnectionOpenedEvent.bind(this);
+     this.onConnectionClosedEvent = this.onConnectionClosedEvent.bind(this);
+@@ -41,6 +61,8 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
+   protected override onInit(): void {
+     if (this._connection) return;
+ 
++    this._isDisposed = false;
++
+     Nitro.instance.events.addEventListener(NitroCommunicationDemoEvent.CONNECTION_AUTHENTICATED, this.onConnectionAuthenticatedEvent);
+ 
+     this._connection = this._communication.createConnection(this);
+@@ -53,16 +75,24 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
+ 
+     if (this._demo) this._demo.init();
+ 
+-    this._connection.init(NitroConfiguration.getValue<string>("socket.url"));
++    this.resolveConnectionSettings();
++
++    this.initConnection();
+   }
+ 
+   protected override onDispose(): void {
++    this._isDisposed = true;
++
++    this.clearReconnectTimer();
++
+     if (this._demo) this._demo.dispose();
+ 
+     if (this._connection) {
+       this._connection.removeEventListener(SocketConnectionEvent.CONNECTION_OPENED, this.onConnectionOpenedEvent);
+       this._connection.removeEventListener(SocketConnectionEvent.CONNECTION_CLOSED, this.onConnectionClosedEvent);
+       this._connection.removeEventListener(SocketConnectionEvent.CONNECTION_ERROR, this.onConnectionErrorEvent);
++      this._connection.dispose();
++      this._connection = null;
+     }
+ 
+     Nitro.instance.events.removeEventListener(NitroCommunicationDemoEvent.CONNECTION_AUTHENTICATED, this.onConnectionAuthenticatedEvent);
+@@ -76,16 +106,22 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
+ 
+   private onConnectionClosedEvent(event: CloseEvent): void {
+     NitroLogger.log("Connection Closed");
++
++    this.scheduleReconnect("closed");
+   }
+ 
+   private onConnectionErrorEvent(event: Event): void {
+     NitroLogger.log("Connection Error");
++
++    this.scheduleReconnect("error");
+   }
+ 
+   private onConnectionAuthenticatedEvent(event: INitroEvent): void {
+     NitroLogger.log("Connection Authenticated");
+ 
+     if (this._connection) this._connection.authenticated();
++
++    this.resetReconnectState();
+   }
+ 
+   public connectionInit(socketUrl: string): void {
+@@ -104,6 +140,119 @@ export class NitroCommunicationManager extends NitroManager implements INitroCom
+     this._connection.removeMessageEvent(event);
+   }
+ 
++  private initConnection(): void {
++    if (!this._connection || !this._socketUrl) {
++      NitroLogger.error("Missing socket URL configuration");
++
++      return;
++    }
++
++    this._connection.init(this._socketUrl);
++  }
++
++  private resolveConnectionSettings(): void {
++    const socketUrl = NitroConfiguration.getValue<string>("socket.url", "");
++
++    this._socketUrl = this.normalizeSocketUrl(socketUrl);
++
++    this._autoReconnectEnabled = NitroConfiguration.getValue<boolean>("socket.auto.reconnect.enabled", true);
++    this._maxReconnectAttempts = NitroConfiguration.getValue<number>("socket.auto.reconnect.max.attempts", -1);
++    this._baseReconnectDelayMs = Math.max(
++      250,
++      NitroConfiguration.getValue<number>("socket.auto.reconnect.base.delay.ms", this._baseReconnectDelayMs)
++    );
++    this._maxReconnectDelayMs = Math.max(
++      this._baseReconnectDelayMs,
++      NitroConfiguration.getValue<number>("socket.auto.reconnect.max.delay.ms", this._maxReconnectDelayMs)
++    );
++
++    const jitterRatio = NitroConfiguration.getValue<number>("socket.auto.reconnect.jitter.ratio", this._reconnectJitterRatio);
++
++    this._reconnectJitterRatio = Math.min(1, Math.max(0, jitterRatio));
++  }
++
++  private normalizeSocketUrl(socketUrl: string): string {
++    if (!socketUrl) return socketUrl;
++
++    try {
++      if (typeof window === "undefined" || !window.location) {
++        const parsed = new URL(socketUrl);
++
++        return parsed.toString();
++      }
++
++      const parsed = new URL(socketUrl, window.location.origin);
++
++      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
++        parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
++      }
++
++      if (window.location.protocol === "https:" && parsed.protocol === "ws:") parsed.protocol = "wss:";
++
++      return parsed.toString();
++    } catch {
++      return socketUrl;
++    }
++  }
++
++  private scheduleReconnect(reason: "closed" | "error"): void {
++    if (this._isDisposed || !this._connection || !this._autoReconnectEnabled) return;
++    if (this._reconnectTimer) return;
++
++    if (this._maxReconnectAttempts >= 0 && this._reconnectAttempts >= this._maxReconnectAttempts) {
++      NitroLogger.warn("Reconnect limit reached", this._maxReconnectAttempts);
++
++      return;
++    }
++
++    const attemptNumber = this._reconnectAttempts + 1;
++    const delay = this.calculateReconnectDelay(attemptNumber);
++
++    this._reconnectAttempts = attemptNumber;
++
++    NitroLogger.log(`Scheduling reconnect #${attemptNumber} in ${delay}ms (${reason})`);
++
++    this._reconnectTimer = setTimeout(() => {
++      this._reconnectTimer = null;
++
++      if (this._isDisposed || !this._connection) return;
++
++      this.resolveConnectionSettings();
++
++      if (!this._socketUrl) {
++        NitroLogger.error("Reconnect aborted: missing socket URL");
++
++        return;
++      }
++
++      NitroLogger.log(`Running reconnect #${attemptNumber}`);
++
++      this._connection.init(this._socketUrl);
++    }, delay);
++  }
++
++  private calculateReconnectDelay(attempt: number): number {
++    const exponent = Math.max(0, attempt - 1);
++    const scaledDelay = Math.min(this._maxReconnectDelayMs, this._baseReconnectDelayMs * Math.pow(2, exponent));
++    const jitter = Math.floor(scaledDelay * this._reconnectJitterRatio * Math.random());
++
++    return scaledDelay + jitter;
++  }
++
++  private clearReconnectTimer(): void {
++    if (!this._reconnectTimer) return;
++
++    clearTimeout(this._reconnectTimer);
++
++    this._reconnectTimer = null;
++  }
++
++  private resetReconnectState(): void {
++    this.clearReconnectTimer();
++
++    this._reconnectAttempts = 0;
++  }
++
+   public get demo(): INitroCommunicationDemo {
+     return this._demo;
+   }

@@ -63,7 +63,6 @@ services:
 
       - DB01_TYPE=mysql
       - DB01_HOST=db
-      - DB01_NAME=$MYSQL_USER
       - DB01_USER=$MYSQL_USER
       - DB01_PASS=$MYSQL_PASSWORD
       - DB01_NAME=$MYSQL_DATABASE

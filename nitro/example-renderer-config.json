@@ -1,5 +1,10 @@
 {
     "socket.url": "ws://127.0.0.1:2096",
+    "socket.auto.reconnect.enabled": true,
+    "socket.auto.reconnect.max.attempts": -1,
+    "socket.auto.reconnect.base.delay.ms": 1500,
+    "socket.auto.reconnect.max.delay.ms": 15000,
+    "socket.auto.reconnect.jitter.ratio": 0.2,
     "asset.url": "http://127.0.0.1:8080/assets",
     "image.library.url": "http://127.0.0.1:8080/swf/c_images/",
     "hof.furni.url": "http://127.0.0.1:8080/swf/dcr/hof_furni/",
